@@ -69,7 +69,7 @@ class YOLODataset(BaseDataset):
         >>> dataset.get_labels()
     """
 
-    def __init__(self, *args, data=None, task="detect", **kwargs):
+    def __init__(self, *args, data=None, task="detect", project=None, recreate_cache=False, **kwargs):
         """
         Initialize the YOLODataset.
 
@@ -83,6 +83,16 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        if isinstance(project, str):
+            import os
+            import sys
+            sys.path.append(os.getcwd())
+            import importlib
+            project_module = importlib.import_module(f'projects.{project}.common')
+            project_cls = getattr(project_module, 'Project')
+            project = project_cls()
+        self.recreate_cache = recreate_cache
+        self.project = project
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, channels=self.data["channels"], **kwargs)
 
@@ -118,6 +128,7 @@ class YOLODataset(BaseDataset):
                     repeat(nkpt),
                     repeat(ndim),
                     repeat(self.single_cls),
+                    repeat(self.project),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
@@ -166,6 +177,8 @@ class YOLODataset(BaseDataset):
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
+            if self.recreate_cache:
+                raise FileNotFoundError
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash

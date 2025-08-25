@@ -1,0 +1,13 @@
+path: /mnt/ceph2/datasets/kuaiduya2
+train: train.txt
+val: val.txt
+test: val.txt
+
+# Classes
+names:
+  0: line
+  1: order
+  2: word+symbol
+  3: word
+  4: symbol
+  5: sentence

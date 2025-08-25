@@ -1,0 +1,15 @@
+path: /mnt/ceph2/datasets/kuaiduya2
+train: train.txt
+val: test2.txt
+test: test2.txt
+
+# Classes
+names:
+  0: line
+  1: handwriting
+  2: dialog
+  3: block
+  4: border
+  5: sentence
+  6: order
+  7: table

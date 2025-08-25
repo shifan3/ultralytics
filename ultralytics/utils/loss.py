@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, xywhr2xyxyxyxy
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -109,6 +109,17 @@ class BboxLoss(nn.Module):
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
+        pred_dist_pos = pred_dist[fg_mask]
+        anchor_points_x = anchor_points.unsqueeze(0).repeat([pred_bboxes.shape[0], 1, 1])  # (b, h*w, 2)
+        anchor_points_pos = anchor_points_x[fg_mask]
+        target_bboxes_pos = target_bboxes[fg_mask]
+        x1y1, x2y2 = target_bboxes_pos.chunk(2, -1)
+        target_dist_pos = torch.cat((anchor_points_pos - x1y1, x2y2 - anchor_points_pos), -1)
+        # l1_loss = F.l1_loss(pred_dist_pos, target_dist_pos, reduction="sum") / target_scores_sum
+        l1_loss = F.l1_loss(pred_dist_pos, target_dist_pos, reduction="sum") / target_scores_sum
+        l1_loss *= 0.8
+        # loss_iou *= 0.1
+
         # DFL loss
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
@@ -117,7 +128,7 @@ class BboxLoss(nn.Module):
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
-        return loss_iou, loss_dfl
+        return loss_iou, l1_loss
 
 
 class RotatedBboxLoss(BboxLoss):
@@ -130,6 +141,29 @@ class RotatedBboxLoss(BboxLoss):
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """Compute IoU and DFL losses for rotated bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+
+        pred_bboxes_pos = pred_bboxes[fg_mask]  # Nx5, xywhr
+        target_bboxes_pos = target_bboxes[fg_mask]  # Nx5, xywhr
+        target_scores_pos = target_scores[fg_mask]  # Nx1
+        target_cls_pos = target_scores_pos.argmax(-1)
+
+        pred_bboxes_pos_xyxyxyxy = xywhr2xyxyxyxy(pred_bboxes_pos).view(-1, 8)
+        target_bboxes_pos_xyxyxyxy = xywhr2xyxyxyxy(target_bboxes_pos).view(-1, 8)
+
+        topic_pred_bboxes_pos_xyxyxyxy = pred_bboxes_pos_xyxyxyxy[target_cls_pos == 5]
+        topic_target_bboxes_pos_xyxyxyxy = target_bboxes_pos_xyxyxyxy[target_cls_pos == 5]
+        topic_weight = weight[target_cls_pos == 5]
+        topic_scores_sum = topic_weight.sum()
+        # import pdb
+        # pdb.set_trace()
+
+        loss_l1 = (F.smooth_l1_loss(pred_bboxes_pos_xyxyxyxy, target_bboxes_pos_xyxyxyxy, reduction="none") * weight).sum() / target_scores_sum
+        loss_l1 *= 0.1
+
+        loss_l1_topic = (F.smooth_l1_loss(topic_pred_bboxes_pos_xyxyxyxy, topic_target_bboxes_pos_xyxyxyxy,
+                                          reduction="none") * topic_weight).sum() / topic_scores_sum
+        # loss_l2 = (F.mse_loss(pred_bboxes_pos_xyxyxyxy, target_bboxes_pos_xyxyxyxy, reduction="none") * weight).sum() / target_scores_sum
+        # loss_l1 += loss_l1_topic * 0.01
         iou = probiou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
@@ -141,7 +175,7 @@ class RotatedBboxLoss(BboxLoss):
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
-        return loss_iou, loss_dfl
+        return loss_iou, loss_l1
 
 
 class KeypointLoss(nn.Module):

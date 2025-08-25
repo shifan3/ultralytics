@@ -173,3 +173,7 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+/models/
+/runs/
+/data/

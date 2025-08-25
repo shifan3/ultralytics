@@ -170,12 +170,13 @@ def verify_image(args):
                     msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
         nf = 1
     except Exception as e:
+        raise
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
     return (im_file, cls), nf, nc, msg
 
 
-def verify_image_label(args):
+def verify_image_label0(args):
     """Verify one image-label pair."""
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
@@ -243,8 +244,323 @@ def verify_image_label(args):
         lb = lb[:, :5]
         return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
+        raise
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+
+
+def lefttop_rightbottom_theta_to_4points(region):
+    x1, y1, x2, y2, theta = region
+    points = []
+    points.append((x1, y1, 1))
+    points.append((x2, y1, 1))
+    points.append((x2, y2, 1))
+    points.append((x1, y2, 1))
+
+    M = cv2.getRotationMatrix2D((x1, y1), - theta, 1)
+    Mt = np.transpose(M)
+    roated_points = np.matmul(points, Mt)
+    ret = []
+    for i in range(roated_points.shape[0]):
+        ret.append(tuple(roated_points[i]))
+    return ret
+
+
+def verify_image_label_pretrain(args):
+    """Verify one image-label pair."""
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
+    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    cls_map = {1: 0, 10: 0,  # 行，姓名
+               2: 1,  # 答案
+               3: 2,  # 插图
+               4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 3,  # 题框
+              }
+    try:
+        # Verify images
+        im = Image.open(im_file)
+        im.verify()  # PIL verify
+        shape = exif_size(im)  # image size
+        shape = (shape[1], shape[0])  # hw
+        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+        if im.format.lower() in {"jpg", "jpeg"}:
+            with open(im_file, "rb") as f:
+                f.seek(-2, 2)
+                if f.read() != b"\xff\xd9":  # corrupt JPEG
+                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+
+        # Verify labels
+        if os.path.isfile(lb_file):
+            nf = 1  # label found
+            with open(lb_file) as f:
+                data = json.load(f)
+                classes = []
+                segments = []
+                for region in data['regions']:
+                    if region['cls'] not in cls_map:
+                        continue
+                    cls = cls_map[region['cls']]
+                    bbox = region['region']
+                    rotation = region['rotation']
+                    p1, p2, p3, p4 = lefttop_rightbottom_theta_to_4points(bbox + [rotation])
+                    # p1 = (int(p1[0]), int(p1[1]))
+                    # p2 = (int(p2[0]), int(p2[1]))
+                    # p3 = (int(p3[0]), int(p3[1]))
+                    # p4 = (int(p4[0]), int(p4[1]))
+                    # cv2.line(im_np, tuple(p1), tuple(p2), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p2), tuple(p3), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p3), tuple(p4), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p4), tuple(p1), (0,255,0), 2)
+                    segment = np.array([p1, p2, p3, p4], dtype=np.float32).reshape(-1, 2)
+                    segment[:, 0::2] /= shape[1]
+                    segment[:, 1::2] /= shape[0]
+                    #segment[:, 0::2] = np.clip(segment[:, 0::2], 0, 1)
+                    #segment[:, 1::2] = np.clip(segment[:, 1::2], 0, 1)
+                    classes.append(cls)
+                    segments.append(segment)
+                classes = np.array(classes, dtype=np.float32)
+                lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)
+
+                # lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                # if any(len(x) > 6 for x in lb):  # is segment
+                #     classes = np.array([x[0] for x in lb], dtype=np.float32)
+                #     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                #     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                lb = np.array(lb, dtype=np.float32)
+            nl = len(lb)
+            if nl:
+                if keypoint:
+                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
+                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                else:
+                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                    points = lb[:, 1:]
+                assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
+                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+
+                # All labels
+                max_cls = lb[:, 0].max()  # max label count
+                assert max_cls <= num_cls, (
+                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                    f"Possible class labels are 0-{num_cls - 1}"
+                )
+                _, i = np.unique(lb, axis=0, return_index=True)
+                if len(i) < nl:  # duplicate row check
+                    lb = lb[i]  # remove duplicates
+                    if segments:
+                        segments = [segments[x] for x in i]
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
+            else:
+                ne = 1  # label empty
+                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+        else:
+            nm = 1  # label missing
+            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+        if keypoint:
+            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            if ndim == 2:
+                kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
+                keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
+        lb = lb[:, :5]
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+    except Exception as e:
+        raise
+        nc = 1
+        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+
+
+def verify_image_label_word(args):
+    """Verify one image-label pair."""
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
+    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    try:
+        # Verify images
+        im = Image.open(im_file)
+        im.verify()  # PIL verify
+        shape = exif_size(im)  # image size
+        shape = (shape[1], shape[0])  # hw
+        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+        if im.format.lower() in {"jpg", "jpeg"}:
+            with open(im_file, "rb") as f:
+                f.seek(-2, 2)
+                if f.read() != b"\xff\xd9":  # corrupt JPEG
+                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+        if os.path.isfile(lb_file):
+            nf = 1  # label found
+            with open(lb_file) as f:
+                data = json.load(f)
+                classes = []
+                segments = []
+                for region in data['regions']:
+                    if region['cls'] > 13:
+                        continue
+                    if region['cls'] == 13:
+                        region['cls'] = 2
+                    elif region['cls'] > 13:
+                        region['cls'] -= 1
+                    cls = region['cls']
+                    bbox = region['region']
+                    rotation = region['rotation']
+                    p1, p2, p3, p4 = lefttop_rightbottom_theta_to_4points(bbox + [rotation])
+                    # p1 = (int(p1[0]), int(p1[1]))
+                    # p2 = (int(p2[0]), int(p2[1]))
+                    # p3 = (int(p3[0]), int(p3[1]))
+                    # p4 = (int(p4[0]), int(p4[1]))
+                    # cv2.line(im_np, tuple(p1), tuple(p2), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p2), tuple(p3), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p3), tuple(p4), (0,255,0), 2)
+                    # cv2.line(im_np, tuple(p4), tuple(p1), (0,255,0), 2)
+                    segment = np.array([p1, p2, p3, p4], dtype=np.float32).reshape(-1, 2)
+                    segment[:, 0::2] /= shape[1]
+                    segment[:, 1::2] /= shape[0]
+                    #segment[:, 0::2] = np.clip(segment[:, 0::2], 0, 1)
+                    #segment[:, 1::2] = np.clip(segment[:, 1::2], 0, 1)
+                    classes.append(cls)
+                    segments.append(segment)
+                #print(segments2boxes(segments))
+
+                #pdb.set_trace()
+                classes = np.array(classes, dtype=np.float32)
+                lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)
+
+                # lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                # if any(len(x) > 6 for x in lb):  # is segment
+                #     classes = np.array([x[0] for x in lb], dtype=np.float32)
+                #     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                #     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                lb = np.array(lb, dtype=np.float32)
+            nl = len(lb)
+            if nl:
+                if keypoint:
+                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
+                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                else:
+                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                    points = lb[:, 1:]
+                assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
+                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+
+                # All labels
+                max_cls = lb[:, 0].max()  # max label count
+                assert max_cls <= num_cls, (
+                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                    f"Possible class labels are 0-{num_cls - 1}"
+                )
+                _, i = np.unique(lb, axis=0, return_index=True)
+                if len(i) < nl:  # duplicate row check
+                    lb = lb[i]  # remove duplicates
+                    if segments:
+                        segments = [segments[x] for x in i]
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
+            else:
+                ne = 1  # label empty
+                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+        else:
+            nm = 1  # label missing
+            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+        if keypoint:
+            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            if ndim == 2:
+                kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
+                keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
+        lb = lb[:, :5]
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+    except Exception as e:
+        raise
+        nc = 1
+        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+
+
+def verify_image_label(args):
+    """Verify one image-label pair."""
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls, project = args
+    # Number (missing, found, empty, corrupt), message, segments, keypoints
+    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    try:
+        # Verify images
+        im = Image.open(im_file)
+        im.verify()  # PIL verify
+        shape = exif_size(im)  # image size
+        shape = (shape[1], shape[0])  # hw
+        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+        if im.format.lower() in {"jpg", "jpeg"}:
+            with open(im_file, "rb") as f:
+                f.seek(-2, 2)
+                if f.read() != b"\xff\xd9":  # corrupt JPEG
+                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+        if os.path.isfile(lb_file):
+            nf = 1  # label found
+            with open(lb_file) as f:
+                data = json.load(f)
+                classes = []
+                segments = []
+                for region in data['regions']:
+                    # assert region['cls'] not in [6, 15, 11], f"invalid cls {region['cls']}"
+                    cls = project.cls_to_raw(region['cls'])
+                    if cls is None:
+                        continue
+                    bbox = region['region']
+                    rotation = region['rotation']
+                    p1, p2, p3, p4 = lefttop_rightbottom_theta_to_4points(bbox + [rotation])
+                    segment = np.array([p1, p2, p3, p4], dtype=np.float32).reshape(-1, 2)
+                    segment[:, 0::2] /= shape[1]
+                    segment[:, 1::2] /= shape[0]
+                    classes.append(cls)
+                    segments.append(segment)
+
+                classes = np.array(classes, dtype=np.float32)
+                lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)
+                lb = np.array(lb, dtype=np.float32)
+            nl = len(lb)
+            if nl:
+                if keypoint:
+                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
+                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                else:
+                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
+                    points = lb[:, 1:]
+                assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
+                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+
+                # All labels
+                max_cls = lb[:, 0].max()  # max label count
+                assert max_cls <= num_cls, (
+                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                    f"Possible class labels are 0-{num_cls - 1}"
+                )
+                _, i = np.unique(lb, axis=0, return_index=True)
+                if len(i) < nl:  # duplicate row check
+                    lb = lb[i]  # remove duplicates
+                    if segments:
+                        segments = [segments[x] for x in i]
+                    msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
+            else:
+                ne = 1  # label empty
+                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+        else:
+            nm = 1  # label missing
+            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+        if keypoint:
+            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            if ndim == 2:
+                kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
+                keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
+        lb = lb[:, :5]
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+    except Exception as e:
+        raise
+        nc = 1
+        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
         return [None, None, None, None, None, nm, nf, ne, nc, msg]
 
 

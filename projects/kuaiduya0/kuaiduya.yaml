@@ -1,0 +1,66 @@
+path: ../datasets/coco  # dataset root dir
+train: /mnt/ceph2/datasets/diandu/link2/train.txt  # train images (relative to 'path') 118287 images
+val: /mnt/ceph2/datasets/diandu/link2/val.txt  # val images (relative to 'path') 5000 images
+test: /mnt/ceph2/datasets/diandu/link2/val.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
+
+
+
+# Classes
+names:
+  0: unused
+  1: sentence
+  2: handwriting
+  3: border
+  4: music
+  5: dialog
+  6: word+symbol
+  7: block
+  8: order
+  9: options
+  10: option
+  11: symbol
+  12: unused
+  13: unused
+  14: table
+  15: word
+  16: line
+
+project:
+  123
+
+# stuff names
+stuff_names: [
+  'banner', 'blanket', 'branch', 'bridge', 'building-other', 'bush', 'cabinet', 'cage',
+  'cardboard', 'carpet', 'ceiling-other', 'ceiling-tile', 'cloth', 'clothes', 'clouds', 'counter', 'cupboard',
+  'curtain', 'desk-stuff', 'dirt', 'door-stuff', 'fence', 'floor-marble', 'floor-other', 'floor-stone', 'floor-tile',
+  'floor-wood', 'flower', 'fog', 'food-other', 'fruit', 'furniture-other', 'grass', 'gravel', 'ground-other', 'hill',
+  'house', 'leaves', 'light', 'mat', 'metal', 'mirror-stuff', 'moss', 'mountain', 'mud', 'napkin', 'net', 'paper',
+  'pavement', 'pillow', 'plant-other', 'plastic', 'platform', 'playingfield', 'railing', 'railroad', 'river', 'road',
+  'rock', 'roof', 'rug', 'salad', 'sand', 'sea', 'shelf', 'sky-other', 'skyscraper', 'snow', 'solid-other', 'stairs',
+  'stone', 'straw', 'structural-other', 'table', 'tent', 'textile-other', 'towel', 'tree', 'vegetable', 'wall-brick',
+  'wall-concrete', 'wall-other', 'wall-panel', 'wall-stone', 'wall-tile', 'wall-wood', 'water-other', 'waterdrops',
+  'window-blind', 'window-other', 'wood',
+  # other
+  'other',
+  # unlabeled
+  'unlabeled'
+]
+
+
+# Download script/URL (optional)
+download: |
+  from utils.general import download, Path
+
+
+  # Download labels
+  #segments = True  # segment or box labels
+  #dir = Path(yaml['path'])  # dataset root dir
+  #url = 'https://github.com/WongKinYiu/yolov7/releases/download/v0.1/'
+  #urls = [url + ('coco2017labels-segments.zip' if segments else 'coco2017labels.zip')]  # labels
+  #download(urls, dir=dir.parent)
+
+  # Download data
+  #urls = ['http://images.cocodataset.org/zips/train2017.zip',  # 19G, 118k images
+  #        'http://images.cocodataset.org/zips/val2017.zip',  # 1G, 5k images
+  #        'http://images.cocodataset.org/zips/test2017.zip']  # 7G, 41k images (optional)
+  #download(urls, dir=dir / 'images', threads=3)
